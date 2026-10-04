@@ -1,61 +1,167 @@
+# ==========================================================
+# TERRAFORM CI/CD PIPELINE
+# Flow:
+#
+# feature/*
+#     ↓
+# Init
+#     ↓
+# Security / Quality
+#     ↓
+# FinOps / Cost
+#     ↓
+# Terraform Plan
+#     ↓
+# PR Review
+#     ↓
+# Merge to main
+#     ↓
+# Terraform Apply
+#
+# IMPORTANT:
+# Direct push to main must be blocked through
+# Azure DevOps Branch Policy.
+# ==========================================================
+
+
+# ==========================================================
+# TRIGGERS
+# ==========================================================
+
 trigger:
   branches:
     include:
       - main
       - feature/*
 
-pr: none
+
+# For Azure Repos Git:
+# Configure PR validation from:
+# Repos -> Branches -> main -> Branch Policies
+#
+# The following PR block is useful for repositories where
+# YAML PR triggers are supported.
+
+pr:
+  branches:
+    include:
+      - main
+  drafts: false
+  autoCancel: true
+
+
+# ==========================================================
+# PARAMETERS
+# ==========================================================
 
 parameters:
+
+  # --------------------------------------------------------
+  # Terraform Remote State
+  # --------------------------------------------------------
+
   - name: tfStateResourceGroup
     displayName: Terraform state resource group
     type: string
     default: ''
+
   - name: tfStateStorageAccount
     displayName: Terraform state storage account
     type: string
     default: ''
+
   - name: tfStateContainer
     displayName: Terraform state container
     type: string
-    default: tfstate
+    default: 'tfstate'
+
   - name: tfStateKey
     displayName: Terraform state key
     type: string
-    default: pre-production.tfstate
+    default: 'pre-production.tfstate'
+
+
+  # --------------------------------------------------------
+  # SSH Public Key
+  # --------------------------------------------------------
+
   - name: sshPublicKeySecureFile
     displayName: SSH public key Secure File name
     type: string
     default: ''
 
+
+# ==========================================================
+# VARIABLES
+# ==========================================================
+
 variables:
+
   terraformVersion: '1.14.6'
-  azureServiceConnection: 'REPLACE_WITH_AZURE_SERVICE_CONNECTION'
+
+  # Your Azure DevOps Service Connection
+  azureServiceConnection: 'Azure-Code-Synch-SC'
+
+  # Terraform root module
   terraformRoot: '$(Build.SourcesDirectory)/Pre-production/master-module'
 
+
+# ==========================================================
+# STAGE 1
+# TERRAFORM INIT
+# ==========================================================
+
 stages:
+
   - stage: Init
-    displayName: Terraform Init
+    displayName: 'Terraform Init'
+
     jobs:
+
       - job: TerraformInit
-        displayName: Initialize Terraform backend and providers
+        displayName: 'Initialize Terraform Backend and Providers'
+
         pool:
-          vmImage: ubuntu-latest
+          vmImage: 'ubuntu-latest'
+
         steps:
+
           - checkout: self
 
+
+          # ------------------------------------------------
+          # Azure Login + Terraform Init
+          # ------------------------------------------------
+
           - task: AzureCLI@2
-            displayName: Terraform init
+            displayName: 'Terraform Init'
+
             inputs:
+
               azureSubscription: '$(azureServiceConnection)'
+
               scriptType: bash
+
               scriptLocation: inlineScript
+
               addSpnToEnvironment: true
+
               inlineScript: |
+
                 set -euo pipefail
+
+                echo "=========================================="
+                echo "Azure Authentication"
+                echo "=========================================="
+
                 : "${servicePrincipalId:?Configure a workload identity federation service connection}"
                 : "${tenantId:?Azure service connection tenant ID is missing}"
                 : "${idToken:?Azure service connection must provide an OIDC token}"
+
+
+                # ------------------------------------------------
+                # Terraform Azure Authentication
+                # ------------------------------------------------
 
                 export ARM_USE_OIDC=true
                 export ARM_USE_AZUREAD=true
@@ -64,10 +170,30 @@ stages:
                 export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
                 export ARM_OIDC_TOKEN="$idToken"
 
+
+                # ------------------------------------------------
+                # Install Terraform
+                # ------------------------------------------------
+
+                echo "Installing Terraform ${TERRAFORM_VERSION}"
+
                 curl -fsSLo /tmp/terraform.zip \
                   "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+
                 unzip -oq /tmp/terraform.zip -d /tmp/terraform-bin
-                sudo install /tmp/terraform-bin/terraform /usr/local/bin/terraform
+
+                sudo install \
+                  /tmp/terraform-bin/terraform \
+                  /usr/local/bin/terraform
+
+                terraform version
+
+
+                # ------------------------------------------------
+                # Terraform Init
+                # ------------------------------------------------
+
+                echo "Initializing Terraform..."
 
                 terraform -chdir="$TERRAFORM_ROOT" init \
                   -input=false \
@@ -78,44 +204,355 @@ stages:
                   -backend-config="key=${TF_STATE_KEY}" \
                   -backend-config="use_azuread_auth=true" \
                   -backend-config="use_oidc=true"
+
             env:
+
               TERRAFORM_VERSION: $(terraformVersion)
+
               TERRAFORM_ROOT: $(terraformRoot)
+
               TF_STATE_RESOURCE_GROUP: '${{ parameters.tfStateResourceGroup }}'
+
               TF_STATE_STORAGE_ACCOUNT: '${{ parameters.tfStateStorageAccount }}'
+
               TF_STATE_CONTAINER: '${{ parameters.tfStateContainer }}'
+
               TF_STATE_KEY: '${{ parameters.tfStateKey }}'
 
-  - stage: PlanView
-    displayName: Terraform Plan View
+
+# ==========================================================
+# STAGE 2
+# SECURITY + CODE QUALITY
+# ==========================================================
+
+  - stage: Security
+    displayName: 'Security and Terraform Quality'
+
     dependsOn: Init
+
     condition: succeeded()
+
     jobs:
-      - job: TerraformPlan
-        displayName: Create and display Terraform plan
+
+      - job: TerraformSecurity
+
+        displayName: 'Terraform Security Scan'
+
         pool:
-          vmImage: ubuntu-latest
+          vmImage: 'ubuntu-latest'
+
         steps:
+
           - checkout: self
 
-          - task: DownloadSecureFile@1
-            name: sshPublicKey
-            displayName: Download VM SSH public key
-            inputs:
-              secureFile: '${{ parameters.sshPublicKeySecureFile }}'
+
+          # ------------------------------------------------
+          # Install Terraform
+          # ------------------------------------------------
 
           - task: AzureCLI@2
-            displayName: Terraform validate and plan
+            displayName: 'Terraform Security Checks'
+
             inputs:
+
               azureSubscription: '$(azureServiceConnection)'
+
               scriptType: bash
+
               scriptLocation: inlineScript
+
               addSpnToEnvironment: true
+
               inlineScript: |
+
                 set -euo pipefail
+
+
+                # ==================================================
+                # TERRAFORM INSTALL
+                # ==================================================
+
+                echo "=========================================="
+                echo "Installing Terraform"
+                echo "=========================================="
+
+                curl -fsSLo /tmp/terraform.zip \
+                  "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+
+                unzip -oq /tmp/terraform.zip -d /tmp/terraform-bin
+
+                sudo install \
+                  /tmp/terraform-bin/terraform \
+                  /usr/local/bin/terraform
+
+                terraform version
+
+
+                # ==================================================
+                # TERRAFORM FMT
+                # ==================================================
+
+                echo "=========================================="
+                echo "Terraform Format Check"
+                echo "=========================================="
+
+                terraform -chdir="$TERRAFORM_ROOT" fmt \
+                  -check \
+                  -recursive \
+                  -diff
+
+
+                # ==================================================
+                # TERRAFORM VALIDATE
+                # ==================================================
+
+                echo "=========================================="
+                echo "Terraform Validate"
+                echo "=========================================="
+
+                terraform -chdir="$TERRAFORM_ROOT" validate -no-color
+
+
+                # ==================================================
+                # TFLINT
+                # ==================================================
+
+                echo "=========================================="
+                echo "TFLint"
+                echo "=========================================="
+
+                curl -s \
+                  https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh \
+                  | bash
+
+                tflint --version
+
+                cd "$TERRAFORM_ROOT"
+
+                tflint --init
+
+                tflint --format compact
+
+
+                # ==================================================
+                # CHECKOV
+                # ==================================================
+
+                echo "=========================================="
+                echo "Checkov"
+                echo "=========================================="
+
+                python3 -m pip install --upgrade pip
+
+                python3 -m pip install checkov
+
+                checkov --version
+
+                checkov \
+                  -d "$TERRAFORM_ROOT" \
+                  --framework terraform \
+                  --quiet
+
+
+                # ==================================================
+                # TRIVY
+                # ==================================================
+
+                echo "=========================================="
+                echo "Trivy"
+                echo "=========================================="
+
+                sudo apt-get update
+
+                sudo apt-get install -y \
+                  wget \
+                  apt-transport-https \
+                  gnupg
+
+                wget -qO - \
+                  https://aquasecurity.github.io/trivy-repo/deb/public.key \
+                  | gpg --dearmor \
+                  | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+                echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] \
+                https://aquasecurity.github.io/trivy-repo/deb generic main" \
+                | sudo tee /etc/apt/sources.list.d/trivy.list
+
+                sudo apt-get update
+
+                sudo apt-get install -y trivy
+
+                trivy --version
+
+
+                # ------------------------------------------------
+                # IaC Security Scan
+                # ------------------------------------------------
+
+                trivy config \
+                  "$TERRAFORM_ROOT" \
+                  --severity HIGH,CRITICAL \
+                  --exit-code 1
+
+            env:
+
+              TERRAFORM_VERSION: $(terraformVersion)
+
+              TERRAFORM_ROOT: $(terraformRoot)
+
+
+# ==========================================================
+# STAGE 3
+# FINOPS / COST ESTIMATION
+# ==========================================================
+
+  - stage: FinOps
+
+    displayName: 'FinOps Cost Estimation'
+
+    dependsOn: Security
+
+    condition: succeeded()
+
+    jobs:
+
+      - job: Infracost
+
+        displayName: 'Terraform Cost Estimation'
+
+        pool:
+          vmImage: 'ubuntu-latest'
+
+        steps:
+
+          - checkout: self
+
+
+          - task: AzureCLI@2
+
+            displayName: 'Run Infracost'
+
+            inputs:
+
+              azureSubscription: '$(azureServiceConnection)'
+
+              scriptType: bash
+
+              scriptLocation: inlineScript
+
+              addSpnToEnvironment: true
+
+              inlineScript: |
+
+                set -euo pipefail
+
+
+                echo "=========================================="
+                echo "Installing Infracost"
+                echo "=========================================="
+
+
+                curl -fsSL \
+                  https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh \
+                  | sh
+
+
+                infracost --version
+
+
+                echo "=========================================="
+                echo "Terraform Cost Estimate"
+                echo "=========================================="
+
+
+                infracost breakdown \
+                  --path "$TERRAFORM_ROOT" \
+                  --format table
+
+            env:
+
+              TERRAFORM_ROOT: $(terraformRoot)
+
+              # Store this as a secret variable / variable group
+              INFRACOST_API_KEY: $(INFRACOST_API_KEY)
+
+
+# ==========================================================
+# STAGE 4
+# TERRAFORM PLAN
+# ==========================================================
+
+  - stage: Plan
+
+    displayName: 'Terraform Plan'
+
+    dependsOn:
+
+      - Security
+      - FinOps
+
+    condition: succeeded()
+
+    jobs:
+
+      - job: TerraformPlan
+
+        displayName: 'Create Terraform Plan'
+
+        pool:
+          vmImage: 'ubuntu-latest'
+
+        steps:
+
+          - checkout: self
+
+
+          # ------------------------------------------------
+          # SSH PUBLIC KEY
+          # ------------------------------------------------
+
+          - task: DownloadSecureFile@1
+
+            name: sshPublicKey
+
+            displayName: 'Download VM SSH Public Key'
+
+            inputs:
+
+              secureFile: '${{ parameters.sshPublicKeySecureFile }}'
+
+
+          # ------------------------------------------------
+          # Terraform Plan
+          # ------------------------------------------------
+
+          - task: AzureCLI@2
+
+            displayName: 'Terraform Validate and Plan'
+
+            inputs:
+
+              azureSubscription: '$(azureServiceConnection)'
+
+              scriptType: bash
+
+              scriptLocation: inlineScript
+
+              addSpnToEnvironment: true
+
+              inlineScript: |
+
+                set -euo pipefail
+
+
+                # ==================================================
+                # AZURE AUTHENTICATION
+                # ==================================================
+
                 : "${servicePrincipalId:?Configure a workload identity federation service connection}"
                 : "${tenantId:?Azure service connection tenant ID is missing}"
                 : "${idToken:?Azure service connection must provide an OIDC token}"
+
 
                 export ARM_USE_OIDC=true
                 export ARM_USE_AZUREAD=true
@@ -124,12 +561,27 @@ stages:
                 export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
                 export ARM_OIDC_TOKEN="$idToken"
 
+
+                # ==================================================
+                # INSTALL TERRAFORM
+                # ==================================================
+
                 curl -fsSLo /tmp/terraform.zip \
                   "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
-                unzip -oq /tmp/terraform.zip -d /tmp/terraform-bin
-                sudo install /tmp/terraform-bin/terraform /usr/local/bin/terraform
 
-                # Hosted jobs use fresh agents, so initialize the backend here too.
+                unzip -oq /tmp/terraform.zip -d /tmp/terraform-bin
+
+                sudo install \
+                  /tmp/terraform-bin/terraform \
+                  /usr/local/bin/terraform
+
+                terraform version
+
+
+                # ==================================================
+                # INIT
+                # ==================================================
+
                 terraform -chdir="$TERRAFORM_ROOT" init \
                   -input=false \
                   -reconfigure \
@@ -140,26 +592,265 @@ stages:
                   -backend-config="use_azuread_auth=true" \
                   -backend-config="use_oidc=true"
 
+
+                # ==================================================
+                # VALIDATE
+                # ==================================================
+
                 terraform -chdir="$TERRAFORM_ROOT" validate -no-color
+
+
+                # ==================================================
+                # PLAN
+                # ==================================================
+
                 mkdir -p "$(dirname "$TF_PLAN_PATH")"
+
                 terraform -chdir="$TERRAFORM_ROOT" plan \
                   -input=false \
                   -no-color \
                   -out="$TF_PLAN_PATH" \
                   -var="admin_ssh_public_key_path=$SSH_PUBLIC_KEY_PATH"
-                terraform -chdir="$TERRAFORM_ROOT" show -no-color "$TF_PLAN_PATH"
+
+
+                # ==================================================
+                # SHOW PLAN
+                # ==================================================
+
+                terraform -chdir="$TERRAFORM_ROOT" show \
+                  -no-color \
+                  "$TF_PLAN_PATH"
+
             env:
+
               TERRAFORM_VERSION: $(terraformVersion)
+
               TERRAFORM_ROOT: $(terraformRoot)
+
               TF_STATE_RESOURCE_GROUP: '${{ parameters.tfStateResourceGroup }}'
+
               TF_STATE_STORAGE_ACCOUNT: '${{ parameters.tfStateStorageAccount }}'
+
               TF_STATE_CONTAINER: '${{ parameters.tfStateContainer }}'
+
               TF_STATE_KEY: '${{ parameters.tfStateKey }}'
+
               TF_PLAN_PATH: $(Build.ArtifactStagingDirectory)/plan/tfplan
+
               SSH_PUBLIC_KEY_PATH: $(sshPublicKey.secureFilePath)
 
+
+          # ------------------------------------------------
+          # Publish Plan
+          # ------------------------------------------------
+
           - task: PublishPipelineArtifact@1
-            displayName: Publish plan artifact for review
+
+            displayName: 'Publish Terraform Plan'
+
             inputs:
+
               targetPath: '$(Build.ArtifactStagingDirectory)/plan'
+
               artifact: terraform-plan
+
+
+# ==========================================================
+# STAGE 5
+# TERRAFORM APPLY
+#
+# APPLY WILL ONLY RUN ON MAIN
+#
+# PR / FEATURE BRANCH:
+#     Apply = NO
+#
+# MAIN:
+#     Apply = YES
+#
+# IMPORTANT:
+# Configure Azure DevOps Environment approval on:
+#
+# terraform-pre-production
+#
+# ==========================================================
+
+  - stage: Apply
+
+    displayName: 'Terraform Apply'
+
+    dependsOn:
+
+      - Security
+      - FinOps
+      - Plan
+
+    condition: |
+      and(
+        succeeded(),
+        eq(
+          variables['Build.SourceBranch'],
+          'refs/heads/main'
+        )
+      )
+
+    jobs:
+
+      - deployment: TerraformApply
+
+        displayName: 'Apply Terraform on Main'
+
+
+        # ------------------------------------------------------
+        # IMPORTANT
+        # Configure Approval & Checks on this Environment
+        # ------------------------------------------------------
+
+        environment: 'terraform-pre-production'
+
+
+        pool:
+          vmImage: 'ubuntu-latest'
+
+
+        strategy:
+
+          runOnce:
+
+            deploy:
+
+              steps:
+
+                - checkout: self
+
+
+                # ------------------------------------------------
+                # SSH PUBLIC KEY
+                # ------------------------------------------------
+
+                - task: DownloadSecureFile@1
+
+                  name: sshPublicKey
+
+                  displayName: 'Download VM SSH Public Key'
+
+                  inputs:
+
+                    secureFile: '${{ parameters.sshPublicKeySecureFile }}'
+
+
+                # ------------------------------------------------
+                # TERRAFORM APPLY
+                # ------------------------------------------------
+
+                - task: AzureCLI@2
+
+                  displayName: 'Terraform Apply'
+
+                  inputs:
+
+                    azureSubscription: '$(azureServiceConnection)'
+
+                    scriptType: bash
+
+                    scriptLocation: inlineScript
+
+                    addSpnToEnvironment: true
+
+                    inlineScript: |
+
+                      set -euo pipefail
+
+
+                      # ==================================================
+                      # AZURE AUTHENTICATION
+                      # ==================================================
+
+                      : "${servicePrincipalId:?Configure a workload identity federation service connection}"
+                      : "${tenantId:?Azure service connection tenant ID is missing}"
+                      : "${idToken:?Azure service connection must provide an OIDC token}"
+
+
+                      export ARM_USE_OIDC=true
+                      export ARM_USE_AZUREAD=true
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+                      export ARM_OIDC_TOKEN="$idToken"
+
+
+                      # ==================================================
+                      # INSTALL TERRAFORM
+                      # ==================================================
+
+                      curl -fsSLo /tmp/terraform.zip \
+                        "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+
+                      unzip -oq /tmp/terraform.zip -d /tmp/terraform-bin
+
+                      sudo install \
+                        /tmp/terraform-bin/terraform \
+                        /usr/local/bin/terraform
+
+
+                      terraform version
+
+
+                      # ==================================================
+                      # INIT
+                      # ==================================================
+
+                      terraform -chdir="$TERRAFORM_ROOT" init \
+                        -input=false \
+                        -reconfigure \
+                        -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
+                        -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
+                        -backend-config="container_name=${TF_STATE_CONTAINER}" \
+                        -backend-config="key=${TF_STATE_KEY}" \
+                        -backend-config="use_azuread_auth=true" \
+                        -backend-config="use_oidc=true"
+
+
+                      # ==================================================
+                      # VALIDATE
+                      # ==================================================
+
+                      terraform -chdir="$TERRAFORM_ROOT" validate -no-color
+
+
+                      # ==================================================
+                      # FINAL PLAN
+                      # ==================================================
+
+                      terraform -chdir="$TERRAFORM_ROOT" plan \
+                        -input=false \
+                        -out="$TF_APPLY_PLAN" \
+                        -var="admin_ssh_public_key_path=$SSH_PUBLIC_KEY_PATH"
+
+
+                      # ==================================================
+                      # APPLY
+                      # ==================================================
+
+                      terraform -chdir="$TERRAFORM_ROOT" apply \
+                        -input=false \
+                        -auto-approve \
+                        "$TF_APPLY_PLAN"
+
+
+                    env:
+
+                      TERRAFORM_VERSION: $(terraformVersion)
+
+                      TERRAFORM_ROOT: $(terraformRoot)
+
+                      TF_STATE_RESOURCE_GROUP: '${{ parameters.tfStateResourceGroup }}'
+
+                      TF_STATE_STORAGE_ACCOUNT: '${{ parameters.tfStateStorageAccount }}'
+
+                      TF_STATE_CONTAINER: '${{ parameters.tfStateContainer }}'
+
+                      TF_STATE_KEY: '${{ parameters.tfStateKey }}'
+
+                      TF_APPLY_PLAN: $(Build.ArtifactStagingDirectory)/tfplan
+
+                      SSH_PUBLIC_KEY_PATH: $(sshPublicKey.secureFilePath)
