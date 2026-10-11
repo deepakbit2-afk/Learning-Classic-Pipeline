@@ -506,12 +506,6 @@ stages:
                 $env:ARM_SUBSCRIPTION_ID = $subscriptionId
                 $env:ARM_OIDC_TOKEN = $env:idToken
 
-                # Get storage account key for backend authentication
-                $backendKey = az storage account keys list --resource-group "$(backendResourceGroupName)" --account-name "$(backendStorageAccountName)" --query "[0].value" -o tsv
-                if ($backendKey) {
-                  $env:ARM_ACCESS_KEY = $backendKey
-                }
-
 
                 # ---------------- TERRAFORM INSTALL ----------------
                 Write-Host "=========================================="
@@ -679,12 +673,6 @@ stages:
 
                       $env:ARM_SUBSCRIPTION_ID = $subscriptionId
                       $env:ARM_OIDC_TOKEN = $env:idToken
-
-                      # Get storage account key for backend authentication
-                      $backendKey = az storage account keys list --resource-group "$(backendResourceGroupName)" --account-name "$(backendStorageAccountName)" --query "[0].value" -o tsv
-                      if ($backendKey) {
-                        $env:ARM_ACCESS_KEY = $backendKey
-                      }
 
 
                       # ---------------- TERRAFORM INSTALL ----------------
