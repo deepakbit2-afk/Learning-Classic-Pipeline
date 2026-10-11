@@ -1,0 +1,13 @@
+# Terraform local artifacts
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform backend local config
+backend.hcl
+*.hcl.local

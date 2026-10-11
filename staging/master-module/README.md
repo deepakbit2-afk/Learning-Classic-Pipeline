@@ -72,15 +72,21 @@ Pre-production/
 
 The VM module reads the public key from `~/.ssh/id_ed25519.pub` by default. Set `admin_ssh_public_key_path` in `variable.tf` or provide it on the Terraform command line if the key is stored elsewhere. Keep private keys out of Terraform files.
 
-## Run
+## Initialize locally
 
-Run commands from the workspace root:
+The AzureRM backend requires Azure state settings, including a storage account,
+container, and state key. When those are not available locally, initialize
+without configuring the backend and validate the Terraform configuration:
 
 ```powershell
-Set-Location Pre-production/master-module
-terraform init
+Set-Location staging/master-module
+terraform init -backend=false
 terraform validate
-terraform plan
 ```
 
-Review the plan before running `terraform apply`. Azure Bastion, virtual machines, storage, and managed disks are billable resources.
+This local initialization does not connect to or read the shared Azure state.
+Do not use it for `terraform plan` or `terraform apply`; use the pipeline, which
+initializes the configured AzureRM backend, or initialize locally with the
+correct backend settings before planning or applying. Review any plan before
+applying. Azure Bastion, virtual machines, storage, and managed disks are
+billable resources.
