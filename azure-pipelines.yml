@@ -274,13 +274,11 @@ stages:
   - stage: FinOps
     displayName: 'FinOps Cost Estimation'
 
-    dependsOn:
-      - Security
+    dependsOn: []
 
     condition: |
       and(
-        not(failed()),
-        not(canceled()),
+        succeeded(),
         eq('${{ parameters.runFinOps }}', 'true')
       )
 
