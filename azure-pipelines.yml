@@ -27,7 +27,7 @@ parameters:
   - name: runFinOps
     displayName: 'Run FinOps Cost Check'
     type: boolean
-    default: true
+    default: false
 
   - name: runPlan
     displayName: 'Run Terraform Plan'
@@ -63,7 +63,7 @@ variables:
   # State is stored in Azure Blob Storage; these values are passed to
   # 'terraform init -backend-config=...' so no interactive prompt ever appears.
   backendResourceGroupName: 'rg-terraform-state'
-  backendStorageAccountName: 'stgacc01'
+  backendStorageAccountName: 'stgtfstate4799'
   backendContainerName: 'tfstate'
   backendStateKey: 'staging/terraform.tfstate'
 
@@ -506,6 +506,12 @@ stages:
                 $env:ARM_SUBSCRIPTION_ID = $subscriptionId
                 $env:ARM_OIDC_TOKEN = $env:idToken
 
+                # Get storage account key for backend authentication
+                $backendKey = az storage account keys list --resource-group "$(backendResourceGroupName)" --account-name "$(backendStorageAccountName)" --query "[0].value" -o tsv
+                if ($backendKey) {
+                  $env:ARM_ACCESS_KEY = $backendKey
+                }
+
 
                 # ---------------- TERRAFORM INSTALL ----------------
                 Write-Host "=========================================="
@@ -673,6 +679,12 @@ stages:
 
                       $env:ARM_SUBSCRIPTION_ID = $subscriptionId
                       $env:ARM_OIDC_TOKEN = $env:idToken
+
+                      # Get storage account key for backend authentication
+                      $backendKey = az storage account keys list --resource-group "$(backendResourceGroupName)" --account-name "$(backendStorageAccountName)" --query "[0].value" -o tsv
+                      if ($backendKey) {
+                        $env:ARM_ACCESS_KEY = $backendKey
+                      }
 
 
                       # ---------------- TERRAFORM INSTALL ----------------
