@@ -1,0 +1,7 @@
+framework:
+  - terraform
+
+soft-fail: true
+
+compact: true
+quiet: true
