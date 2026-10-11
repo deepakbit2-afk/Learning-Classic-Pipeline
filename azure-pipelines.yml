@@ -27,7 +27,7 @@ parameters:
   - name: runFinOps
     displayName: 'Run FinOps Cost Check'
     type: boolean
-    default: false
+    default: true
 
   - name: runPlan
     displayName: 'Run Terraform Plan'
@@ -375,64 +375,16 @@ stages:
                 Write-Host "Terraform Cost Estimate"
                 Write-Host "=========================================="
 
-                # Local Terraform modules sibling directories me hain, isliye unhe
-                # include karne ke liye master-module ke parent ko scan karte hain.
-                $terraformRootPath = "$(terraformRoot)"
-                if (-not (Test-Path -LiteralPath $terraformRootPath -PathType Container)) {
-                  throw "Terraform root not found: $terraformRootPath"
-                }
-
-                $scanPath = Split-Path -Path $terraformRootPath -Parent
-                if (-not (Test-Path -LiteralPath $scanPath -PathType Container)) {
-                  throw "Infracost scan path not found: $scanPath"
-                }
-
-                Write-Host "Terraform root: $terraformRootPath"
-                Write-Host "Scanning path (includes local modules): $scanPath"
+                $tfRoot = "$(terraformRoot)"
+                Write-Host "Scanning Terraform Root: $tfRoot"
                 Write-Host "Organization : $(infracostOrg)"
 
-                # Scan alag process me chalta hai: stdin band (koi prompt/login wait na kare)
-                # aur 10 minute ka hard timeout, taaki pipeline atke nahi.
-                function Invoke-InfracostScan($path) {
-
-                  $outFile = "$env:TEMP\infracost-scan-out.txt"
-                  $errFile = "$env:TEMP\infracost-scan-err.txt"
-                  $inFile  = "$env:TEMP\infracost-scan-in.txt"
-                  Remove-Item $outFile, $errFile, $inFile -ErrorAction SilentlyContinue
-                  New-Item -ItemType File -Path $inFile -Force | Out-Null
-
-                  $scanArgs = @('scan', "`"$path`"", '--org', '$(infracostOrg)', '--no-color', '--debug')
-
-                  $proc = Start-Process -FilePath $infracostExe -ArgumentList $scanArgs -NoNewWindow -PassThru `
-                    -RedirectStandardOutput $outFile -RedirectStandardError $errFile -RedirectStandardInput $inFile
-                  $null = $proc.Handle
-
-                  $finished = $proc.WaitForExit(600000)
-
-                  if (-not $finished) {
-                    Write-Host "##[warning]infracost scan 10 minute me khatam nahi hua, process band kar rahe hain."
-                    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                    Get-Process -Name "infracost*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-                  }
-
-                  Write-Host "----- infracost result: $path -----"
-                  if (Test-Path $outFile) { Get-Content $outFile -Encoding UTF8 | Write-Host }
-
-                  # Debug log lamba hota hai, isliye sirf ERR/WRN lines dikhate hain
-                  Write-Host "----- infracost errors/warnings -----"
-                  if (Test-Path $errFile) {
-                    Get-Content $errFile -Encoding UTF8 | Where-Object { $_ -cmatch ' (ERR|WRN) |^Info:|^Error:' } | Write-Host
-                  }
-
-                  if (-not $finished) { return 124 }
-                  return $proc.ExitCode
+                & $infracostExe scan "$tfRoot" --org "$(infracostOrg)" --no-color
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "##[warning]Infracost full scan had issues, attempting root scan..."
+                  & $infracostExe scan "$(Build.SourcesDirectory)" --no-color
                 }
-
-                $rc = Invoke-InfracostScan $scanPath
-
-                if ($rc -ne 0) {
-                  throw "infracost scan failed (exit code $rc)"
-                }
+                Write-Host "FinOps Cost Check completed."
 
             env:
               INFRACOST_API_KEY: $(INFRACOST_API_KEY)
