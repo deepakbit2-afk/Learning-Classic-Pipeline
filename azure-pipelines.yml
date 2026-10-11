@@ -46,9 +46,12 @@ parameters:
 
 variables:
 
-  # Self-hosted Windows Agent Pool
-  # NOTE: pool me ${{ variables.agentPool }} use karna hai (NOT $(agentPool))
+  # Stage-specific Agent Pools (Can be set to different pools or kept same as 'Default')
   agentPool: 'Default'
+  securityAgentPool: '$(agentPool)'   # e.g. dedicated Security scanner pool or 'Default'
+  finopsAgentPool:   '$(agentPool)'   # e.g. dedicated FinOps pool or 'Default'
+  planAgentPool:     '$(agentPool)'   # e.g. dedicated Plan pool or 'Default'
+  applyAgentPool:    '$(agentPool)'   # e.g. dedicated Production/Apply pool or 'Default'
 
   terraformVersion: '1.14.6'
 
@@ -89,7 +92,7 @@ stages:
         displayName: 'Terraform Security Scan'
 
         pool:
-          name: ${{ variables.agentPool }}
+          name: ${{ variables.securityAgentPool }}
 
         steps:
 
@@ -287,7 +290,7 @@ stages:
         displayName: 'Terraform Cost Estimation'
 
         pool:
-          name: ${{ variables.agentPool }}
+          name: ${{ variables.finopsAgentPool }}
 
         steps:
 
@@ -459,7 +462,7 @@ stages:
         displayName: 'Create Terraform Plan'
 
         pool:
-          name: ${{ variables.agentPool }}
+          name: ${{ variables.planAgentPool }}
 
         steps:
 
@@ -617,7 +620,7 @@ stages:
         environment: 'terraform-pre-production'
 
         pool:
-          name: ${{ variables.agentPool }}
+          name: ${{ variables.applyAgentPool }}
 
         strategy:
 
