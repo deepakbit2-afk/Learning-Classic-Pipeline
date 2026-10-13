@@ -471,6 +471,45 @@ stages:
 
 
 # ============================================================
+# MANUAL APPROVAL
+# ============================================================
+
+  - stage: Approval
+    displayName: 'Manual Approval'
+
+    dependsOn:
+      - Plan
+
+    condition: |
+      and(
+        not(failed()),
+        not(canceled()),
+        eq('${{ parameters.runPlan }}', 'true'),
+        eq('${{ parameters.runApply }}', 'true'),
+        or(
+          eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+          startsWith(variables['Build.SourceBranch'], 'refs/heads/feature')
+        )
+      )
+
+    jobs:
+
+      - job: WaitForApproval
+        displayName: 'Approve Terraform Apply'
+        pool: server
+        timeoutInMinutes: 1440 # Pauses up to 24 hours without consuming any build agent
+
+        steps:
+
+          - task: ManualValidation@0
+            displayName: 'Review Plan and Approve Apply'
+            timeoutInMinutes: 1440
+            inputs:
+              instructions: 'Please review the Terraform Plan and FinOps cost estimate before resuming to Terraform Apply.'
+              onTimeout: 'reject'
+
+
+# ============================================================
 # TERRAFORM APPLY
 # ============================================================
 
@@ -478,9 +517,8 @@ stages:
     displayName: 'Terraform Apply'
 
     dependsOn:
-      - Security
-      - FinOps
       - Plan
+      - Approval
 
     condition: |
       and(
