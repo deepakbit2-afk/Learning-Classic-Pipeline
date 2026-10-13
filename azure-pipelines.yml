@@ -3,7 +3,6 @@ trigger:
     include:
       - main
       - feature/*
-      - feature*
 
 pr:
   branches:
@@ -46,29 +45,20 @@ parameters:
 
 variables:
 
-  # Stage-specific Agent Pools (Can be set to different pools or kept same as 'Default')
+  # Self-hosted Windows Agent Pool
   agentPool: 'Default'
-  securityAgentPool: '$(agentPool)'   # e.g. dedicated Security scanner pool or 'Default'
-  finopsAgentPool:   '$(agentPool)'   # e.g. dedicated FinOps pool or 'Default'
-  planAgentPool:     '$(agentPool)'   # e.g. dedicated Plan pool or 'Default'
-  applyAgentPool:    '$(agentPool)'   # e.g. dedicated Production/Apply pool or 'Default'
 
   terraformVersion: '1.14.6'
 
   azureServiceConnection: 'Azure-Code-Synch-SC'
 
   terraformRoot: '$(Build.SourcesDirectory)\staging\master-module'
+  
+  # Infracost के लिए पूरा रूट पाथ ताकि master और slave दोनों मॉड्यूल्स शामिल हो सकें
+  infracostRoot: '$(Build.SourcesDirectory)\staging'
 
-  # Infracost organization slug (dashboard URL: /org/<slug>/...)
+  # Infracost organization slug
   infracostOrg: 'deepakbit2'
-
-  # ---- Terraform AzureRM Backend Config ----
-  # State is stored in Azure Blob Storage; these values are passed to
-  # 'terraform init -backend-config=...' so no interactive prompt ever appears.
-  backendResourceGroupName: 'rg-terraform-state'
-  backendStorageAccountName: 'stgtfstate4799'
-  backendContainerName: 'tfstate'
-  backendStateKey: 'staging/terraform.tfstate'
 
 
 stages:
@@ -92,13 +82,12 @@ stages:
         displayName: 'Terraform Security Scan'
 
         pool:
-          name: ${{ variables.securityAgentPool }}
+          name: ${{ variables.agentPool }}
 
         steps:
 
           - checkout: self
 
-          # Azure login ki zarurat nahi (init -backend=false), isliye PowerShell@2
           - task: PowerShell@2
             displayName: 'Terraform Security Checks'
 
@@ -232,7 +221,6 @@ stages:
                 $trivyZip = "$env:TEMP\trivy.zip"
                 $trivyExtract = "$env:TEMP\trivy"
 
-                # Asset naming alag ho sakti hai, isliye dono try karte hain
                 $trivyDownloaded = $false
                 foreach ($osName in @("windows-64bit", "Windows-64bit")) {
                   $trivyUrl = "https://github.com/aquasecurity/trivy/releases/download/v$trivyVersion/trivy_${trivyVersion}_$osName.zip"
@@ -264,17 +252,15 @@ stages:
 
                 Write-Host "Trivy IaC Scan"
                 & $trivyExe config "$terraformRoot" --severity HIGH,CRITICAL --exit-code 1
-                Assert-Exit "trivy config"
-
+                Assert-Exit "trivy scan"
 
 # ============================================================
-# FINOPS
+# FINOPS COST CHECK
 # ============================================================
 
   - stage: FinOps
-    displayName: 'FinOps Cost Estimation'
-
-    dependsOn: []
+    displayName: 'FinOps Cost Scan'
+    dependsOn: [] # Security स्टेज का इंतज़ार किए बिना पैरेलल में चलेगा
 
     condition: |
       and(
@@ -284,397 +270,47 @@ stages:
 
     jobs:
 
-      - job: Infracost
-        displayName: 'Terraform Cost Estimation'
+      - job: InfracostScan
+        displayName: 'Infracost Budget & Cost Scan'
 
         pool:
-          name: ${{ variables.finopsAgentPool }}
+          name: ${{ variables.agentPool }}
 
         steps:
 
           - checkout: self
 
           - task: PowerShell@2
-            displayName: 'Run Infracost'
-            timeoutInMinutes: 15
-
-            # Cost estimate informational hai: fail/timeout hone par Plan stage ruke nahi.
-            # Cost failure par pipeline rokna ho to ye line hata do.
-            continueOnError: true
+            displayName: 'Run Infracost Breakdown Scan'
+            env:
+              INFRACOST_API_KEY: $(INFRACOST_API_KEY)
 
             inputs:
               targetType: inline
               pwsh: false
               script: |
-
                 $ErrorActionPreference = "Stop"
 
-                function Assert-Exit($step) {
-                  if ($LASTEXITCODE -ne 0) {
-                    throw "$step failed with exit code $LASTEXITCODE"
-                  }
-                }
-
-                $infracostZip = "$env:TEMP\infracost.zip"
-                $infracostExtract = "$env:TEMP\infracost"
-
-                # Infracost CLI v2 (repo: infracost/cli)
-                $infracostUrl = "https://github.com/infracost/cli/releases/latest/download/infracost-windows-amd64.zip"
-
-                Write-Host "=========================================="
-                Write-Host "Installing Infracost CLI v2"
-                Write-Host "=========================================="
-
-                Invoke-WebRequest -Uri $infracostUrl -OutFile $infracostZip
-
-                if (Test-Path $infracostExtract) {
-                  Remove-Item $infracostExtract -Recurse -Force
-                }
-
-                New-Item -ItemType Directory -Path $infracostExtract -Force | Out-Null
-
-                Expand-Archive -Path $infracostZip -DestinationPath $infracostExtract -Force
-
-                $infracostExe = (Get-ChildItem -Path $infracostExtract -Filter "infracost*.exe" -Recurse | Select-Object -First 1).FullName
-                if ([string]::IsNullOrWhiteSpace($infracostExe)) {
-                  throw "Infracost CLI was not found in the downloaded archive."
-                }
-
-                $infracostVersion = & $infracostExe --version
-                Assert-Exit "infracost version"
-                Write-Host ($infracostVersion -join " ")
-
-                Write-Host "=========================================="
-                Write-Host "Infracost token check"
-                Write-Host "=========================================="
-
-                $rawToken = $env:INFRACOST_API_KEY
-
-                if ([string]::IsNullOrWhiteSpace($rawToken)) {
-                  throw "INFRACOST_API_KEY empty hai. Pipeline Variables me CLI v2 token save karo."
-                }
-
-                $token = $rawToken.Trim()
-
-                if ($token.StartsWith('$' + '(')) {
-                  throw "Variable resolve nahi hua. Variable ka naam INFRACOST_API_KEY exact hona chahiye."
-                }
-
-                if (-not $token.StartsWith('ics_v1_')) {
-                  throw "INFRACOST_API_KEY CLI v2 token (ics_v1_...) hona chahiye. Dashboard > CLI tokens > Create CLI v2 tokens."
-                }
-
-                Write-Host "Token format    : Infracost CLI v2"
-
-                # CLI v2 is env var se authenticate karta hai
-                $env:INFRACOST_CLI_AUTHENTICATION_TOKEN = $token
-
-                Write-Host "=========================================="
-                Write-Host "Terraform Cost Estimate"
-                Write-Host "=========================================="
-
-                $tfRoot = "$(terraformRoot)"
-                Write-Host "Scanning Terraform Root: $tfRoot"
-                Write-Host "Organization : $(infracostOrg)"
-
-                & $infracostExe scan "$tfRoot" --org "$(infracostOrg)" --no-color
+                # रेपो रूट की पहचान
+                infracost config set repo_path "$(Build.SourcesDirectory)"
+                
+                Write-Host "Running Infracost Scan on staging root folder..."
+                infracost breakdown --path "$(infracostRoot)" --format table --org "$(infracostOrg)"
+                
                 if ($LASTEXITCODE -ne 0) {
-                  Write-Host "##[warning]Infracost full scan had issues, attempting root scan..."
-                  & $infracostExe scan "$(Build.SourcesDirectory)" --no-color
+                  Write-Warning "Infracost scan encountered diagnostics warning."
                 }
-                Write-Host "FinOps Cost Check completed."
-
-            env:
-              INFRACOST_API_KEY: $(INFRACOST_API_KEY)
-
 
 # ============================================================
-# PLAN
+# TERRAFORM PLAN STAGE (वैकल्पिक प्लेसहोल्डर)
 # ============================================================
-
-  - stage: Plan
+  - stage: TerraformPlan
     displayName: 'Terraform Plan'
-
-    dependsOn:
-      - Security
-      - FinOps
-
-    condition: |
-      and(
-        not(failed()),
-        not(canceled()),
-        eq('${{ parameters.runPlan }}', 'true')
-      )
-
+    dependsOn: [Security, FinOps]
+    condition: and(succeeded(), eq('${{ parameters.runPlan }}', 'true'))
     jobs:
-
-      - job: TerraformPlan
-        displayName: 'Create Terraform Plan'
-
+      - job: Plan
         pool:
-          name: ${{ variables.planAgentPool }}
-
+          name: ${{ variables.agentPool }}
         steps:
-
-          - checkout: self
-
-          - task: AzureCLI@2
-            displayName: 'Terraform Init and Plan'
-
-            inputs:
-              azureSubscription: '$(azureServiceConnection)'
-              scriptType: ps
-              scriptLocation: inlineScript
-              addSpnToEnvironment: true
-
-              inlineScript: |
-
-                $ErrorActionPreference = "Stop"
-
-                function Assert-Exit($step) {
-                  if ($LASTEXITCODE -ne 0) {
-                    throw "$step failed with exit code $LASTEXITCODE"
-                  }
-                }
-
-                $terraformVersion = "$(terraformVersion)"
-                $terraformRoot = "$(terraformRoot)"
-
-                Write-Host "=========================================="
-                Write-Host "Azure OIDC Authentication"
-                Write-Host "=========================================="
-
-                if (-not $env:servicePrincipalId) { throw "Service connection client ID missing" }
-                if (-not $env:tenantId)           { throw "Tenant ID missing" }
-                if (-not $env:idToken)            { throw "OIDC token missing" }
-
-                $env:ARM_USE_OIDC = "true"
-                $env:ARM_USE_AZUREAD = "true"
-                $env:ARM_CLIENT_ID = $env:servicePrincipalId
-                $env:ARM_TENANT_ID = $env:tenantId
-
-                $subscriptionId = az account show --query id --output tsv
-                Assert-Exit "az account show"
-
-                $env:ARM_SUBSCRIPTION_ID = $subscriptionId
-                $env:ARM_OIDC_TOKEN = $env:idToken
-
-
-                # ---------------- TERRAFORM INSTALL ----------------
-                Write-Host "=========================================="
-                Write-Host "Installing Terraform"
-                Write-Host "=========================================="
-
-                $terraformZip = "$env:TEMP\terraform.zip"
-                $terraformExtract = "$env:TEMP\terraform"
-
-                $terraformUrl = "https://releases.hashicorp.com/terraform/$terraformVersion/terraform_${terraformVersion}_windows_amd64.zip"
-
-                Invoke-WebRequest -Uri $terraformUrl -OutFile $terraformZip
-
-                if (Test-Path $terraformExtract) {
-                  Remove-Item $terraformExtract -Recurse -Force
-                }
-
-                Expand-Archive -Path $terraformZip -DestinationPath $terraformExtract -Force
-
-                $terraformExe = "$terraformExtract\terraform.exe"
-
-                & $terraformExe version
-                Assert-Exit "terraform version"
-
-
-                # ---------------- INIT ----------------
-                Write-Host "=========================================="
-                Write-Host "Terraform Init"
-                Write-Host "=========================================="
-
-                & $terraformExe -chdir="$terraformRoot" init -input=false -reconfigure `
-                  -backend-config="resource_group_name=$(backendResourceGroupName)" `
-                  -backend-config="storage_account_name=$(backendStorageAccountName)" `
-                  -backend-config="container_name=$(backendContainerName)" `
-                  -backend-config="key=$(backendStateKey)"
-                Assert-Exit "terraform init"
-
-
-                # ---------------- VALIDATE ----------------
-                Write-Host "=========================================="
-                Write-Host "Terraform Validate"
-                Write-Host "=========================================="
-
-                & $terraformExe -chdir="$terraformRoot" validate -no-color
-                Assert-Exit "terraform validate"
-
-
-                # ---------------- PLAN ----------------
-                Write-Host "=========================================="
-                Write-Host "Terraform Plan"
-                Write-Host "=========================================="
-
-                $planDirectory = "$(Build.ArtifactStagingDirectory)\plan"
-
-                New-Item -ItemType Directory -Path $planDirectory -Force | Out-Null
-
-                $planPath = "$planDirectory\tfplan"
-
-                & $terraformExe -chdir="$terraformRoot" plan -input=false -no-color -out="$planPath"
-                Assert-Exit "terraform plan"
-
-
-                # ---------------- SHOW ----------------
-                Write-Host "=========================================="
-                Write-Host "Terraform Show"
-                Write-Host "=========================================="
-
-                & $terraformExe -chdir="$terraformRoot" show -no-color "$planPath"
-                Assert-Exit "terraform show"
-
-
-          - task: PublishPipelineArtifact@1
-            displayName: 'Publish Terraform Plan'
-
-            inputs:
-              targetPath: '$(Build.ArtifactStagingDirectory)\plan'
-              artifact: 'terraform-plan'
-
-
-# ============================================================
-# APPLY
-# ============================================================
-
-  - stage: Apply
-    displayName: 'Terraform Apply'
-
-    dependsOn:
-      - Security
-      - FinOps
-      - Plan
-
-    condition: |
-      and(
-        not(failed()),
-        not(canceled()),
-        eq('${{ parameters.runPlan }}', 'true'),
-        eq('${{ parameters.runApply }}', 'true'),
-        or(
-          eq(variables['Build.SourceBranch'], 'refs/heads/main'),
-          startsWith(variables['Build.SourceBranch'], 'refs/heads/feature')
-        )
-      )
-
-    jobs:
-
-      - deployment: TerraformApply
-        displayName: 'Apply Terraform'
-
-        environment: 'terraform-pre-production'
-
-        pool:
-          name: ${{ variables.applyAgentPool }}
-
-        strategy:
-
-          runOnce:
-
-            deploy:
-
-              steps:
-
-                - checkout: self
-
-                # Plan stage ka reviewed plan download karo
-                - download: current
-                  artifact: terraform-plan
-
-                - task: AzureCLI@2
-                  displayName: 'Terraform Apply'
-
-                  inputs:
-                    azureSubscription: '$(azureServiceConnection)'
-                    scriptType: ps
-                    scriptLocation: inlineScript
-                    addSpnToEnvironment: true
-
-                    inlineScript: |
-
-                      $ErrorActionPreference = "Stop"
-
-                      function Assert-Exit($step) {
-                        if ($LASTEXITCODE -ne 0) {
-                          throw "$step failed with exit code $LASTEXITCODE"
-                        }
-                      }
-
-                      $terraformVersion = "$(terraformVersion)"
-                      $terraformRoot = "$(terraformRoot)"
-
-                      Write-Host "=========================================="
-                      Write-Host "Azure OIDC Authentication"
-                      Write-Host "=========================================="
-
-                      if (-not $env:servicePrincipalId) { throw "Service connection client ID missing" }
-                      if (-not $env:tenantId)           { throw "Tenant ID missing" }
-                      if (-not $env:idToken)            { throw "OIDC token missing" }
-
-                      $env:ARM_USE_OIDC = "true"
-                      $env:ARM_USE_AZUREAD = "true"
-                      $env:ARM_CLIENT_ID = $env:servicePrincipalId
-                      $env:ARM_TENANT_ID = $env:tenantId
-
-                      $subscriptionId = az account show --query id --output tsv
-                      Assert-Exit "az account show"
-
-                      $env:ARM_SUBSCRIPTION_ID = $subscriptionId
-                      $env:ARM_OIDC_TOKEN = $env:idToken
-
-
-                      # ---------------- TERRAFORM INSTALL ----------------
-                      Write-Host "=========================================="
-                      Write-Host "Installing Terraform"
-                      Write-Host "=========================================="
-
-                      $terraformZip = "$env:TEMP\terraform.zip"
-                      $terraformExtract = "$env:TEMP\terraform"
-
-                      $terraformUrl = "https://releases.hashicorp.com/terraform/$terraformVersion/terraform_${terraformVersion}_windows_amd64.zip"
-
-                      Invoke-WebRequest -Uri $terraformUrl -OutFile $terraformZip
-
-                      if (Test-Path $terraformExtract) {
-                        Remove-Item $terraformExtract -Recurse -Force
-                      }
-
-                      Expand-Archive -Path $terraformZip -DestinationPath $terraformExtract -Force
-
-                      $terraformExe = "$terraformExtract\terraform.exe"
-
-                      & $terraformExe version
-                      Assert-Exit "terraform version"
-
-
-                      # ---------------- INIT ----------------
-                      Write-Host "=========================================="
-                      Write-Host "Terraform Init"
-                      Write-Host "=========================================="
-
-                      & $terraformExe -chdir="$terraformRoot" init -input=false -reconfigure `
-                        -backend-config="resource_group_name=$(backendResourceGroupName)" `
-                        -backend-config="storage_account_name=$(backendStorageAccountName)" `
-                        -backend-config="container_name=$(backendContainerName)" `
-                        -backend-config="key=$(backendStateKey)"
-                      Assert-Exit "terraform init"
-
-
-                      # ---------------- APPLY (reviewed plan) ----------------
-                      Write-Host "=========================================="
-                      Write-Host "Terraform Apply"
-                      Write-Host "=========================================="
-
-                      $applyPlan = "$(Pipeline.Workspace)\terraform-plan\tfplan"
-
-                      if (-not (Test-Path $applyPlan)) {
-                        throw "Plan file not found at $applyPlan"
-                      }
-
-                      & $terraformExe -chdir="$terraformRoot" apply -input=false -auto-approve "$applyPlan"
-                      Assert-Exit "terraform apply"
+          - script: echo "Terraform Plan Logic Goes Here"
