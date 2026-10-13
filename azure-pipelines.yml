@@ -443,31 +443,46 @@ stages:
                 Write-Host "Terraform Plan"
                 Write-Host "=========================================="
 
-                $planDirectory = "$(Build.ArtifactStagingDirectory)\plan"
+                $planBinaryDirectory = "$(Build.ArtifactStagingDirectory)\plan-binary"
+                $planReadableDirectory = "$(Build.ArtifactStagingDirectory)\plan-readable"
 
-                New-Item -ItemType Directory -Path $planDirectory -Force | Out-Null
+                New-Item -ItemType Directory -Path $planBinaryDirectory -Force | Out-Null
+                New-Item -ItemType Directory -Path $planReadableDirectory -Force | Out-Null
 
-                $planPath = "$planDirectory\tfplan"
+                $planPath = "$planBinaryDirectory\tfplan"
 
                 & $terraformExe -chdir="$terraformRoot" plan -input=false -no-color -out="$planPath"
                 Assert-Exit "terraform plan"
 
 
-                # ---------------- SHOW ----------------
+                # ---------------- HUMAN READABLE PLAN EXPORT ----------------
                 Write-Host "=========================================="
-                Write-Host "Terraform Show"
+                Write-Host "Generating Human-Readable Plan Files"
                 Write-Host "=========================================="
 
-                & $terraformExe -chdir="$terraformRoot" show -no-color "$planPath"
+                # 1. Plain Text Format (Easily readable in Notepad, VS Code, Browser)
+                $planText = & $terraformExe -chdir="$terraformRoot" show -no-color "$planPath"
+                $planText | Out-File -FilePath "$planReadableDirectory\tfplan.txt" -Encoding utf8
+                Write-Host ($planText -join "`n")
+
+                # 2. JSON Format (For audit and programmatic review)
+                & $terraformExe -chdir="$terraformRoot" show -json "$planPath" | Out-File -FilePath "$planReadableDirectory\tfplan.json" -Encoding utf8
                 Assert-Exit "terraform show"
 
 
+          # 1. Binary Artifact (For Terraform Apply engine)
           - task: PublishPipelineArtifact@1
-            displayName: 'Publish Terraform Plan'
-
+            displayName: 'Publish Terraform Plan (Binary)'
             inputs:
-              targetPath: '$(Build.ArtifactStagingDirectory)\plan'
-              artifact: 'terraform-plan'
+              targetPath: '$(Build.ArtifactStagingDirectory)\plan-binary'
+              artifact: 'terraform-plan-binary'
+
+          # 2. Human-Readable Artifact (For Human Review: tfplan.txt & tfplan.json)
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Terraform Plan (Human Readable)'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)\plan-readable'
+              artifact: 'terraform-plan-readable'
 
 
 # ============================================================
@@ -552,9 +567,9 @@ stages:
 
                 - checkout: self
 
-                # Download reviewed plan artifact from Plan stage
+                # Download reviewed binary plan artifact from Plan stage
                 - download: current
-                  artifact: terraform-plan
+                  artifact: terraform-plan-binary
 
                 - task: AzureCLI@2
                   displayName: 'Terraform Apply'
@@ -640,7 +655,7 @@ stages:
                       Write-Host "Terraform Apply"
                       Write-Host "=========================================="
 
-                      $applyPlan = "$(Pipeline.Workspace)\terraform-plan\tfplan"
+                      $applyPlan = "$(Pipeline.Workspace)\terraform-plan-binary\tfplan"
 
                       if (-not (Test-Path $applyPlan)) {
                         throw "Plan file not found at $applyPlan"
