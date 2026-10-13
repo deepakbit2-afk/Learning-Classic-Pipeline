@@ -47,6 +47,8 @@ variables:
 
   # Self-hosted Windows Agent Pool
   agentPool: 'Default'
+  securityAgentName: 'DESKTOP-0LHF21A'
+  finopsAgentName: 'DESKTOP-0LHF21A-2'
 
   terraformVersion: '1.14.6'
 
@@ -83,6 +85,8 @@ stages:
 
         pool:
           name: ${{ variables.agentPool }}
+          demands:
+            - Agent.Name -equals ${{ variables.securityAgentName }}
 
         steps:
 
@@ -275,6 +279,8 @@ stages:
 
         pool:
           name: ${{ variables.agentPool }}
+          demands:
+            - Agent.Name -equals ${{ variables.finopsAgentName }}
 
         steps:
 
