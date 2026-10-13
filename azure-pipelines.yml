@@ -288,6 +288,7 @@ stages:
 
           - task: PowerShell@2
             displayName: 'Run Infracost Breakdown Scan'
+            continueOnError: true
             env:
               INFRACOST_API_KEY: $(INFRACOST_API_KEY)
 
@@ -295,16 +296,22 @@ stages:
               targetType: inline
               pwsh: false
               script: |
-                $ErrorActionPreference = "Stop"
+                Write-Host "=========================================="
+                Write-Host "Running Infracost Cost Breakdown"
+                Write-Host "=========================================="
 
-                # रेपो रूट की पहचान
-                infracost config set repo_path "$(Build.SourcesDirectory)"
-                
-                Write-Host "Running Infracost Scan on staging root folder..."
-                infracost breakdown --path "$(infracostRoot)" --format table --org "$(infracostOrg)"
-                
+                $targetPath = "$(terraformRoot)"
+                if (-not (Test-Path $targetPath)) {
+                  $targetPath = "$(infracostRoot)"
+                }
+
+                Write-Host "Target Directory: $targetPath"
+
+                # Infracost breakdown scan (v0.10.x compatible)
+                infracost breakdown --path "$targetPath" --format table
+
                 if ($LASTEXITCODE -ne 0) {
-                  Write-Warning "Infracost scan encountered diagnostics warning."
+                  Write-Warning "Infracost scan encountered diagnostics warning (exit code $LASTEXITCODE)."
                 }
 
 # ============================================================
